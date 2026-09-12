@@ -1,0 +1,124 @@
+name: Build Cache (SDK + Gradle deps)
+
+# 目的:
+#   このリポジトリのビルドに必要な Android SDK コンポーネント(cmdline-tools /
+#   platform-tools / platforms;android-34 / build-tools;34.0.0)と、Gradle が
+#   解決した全依存関係(~/.gradle/caches, ~/.gradle/wrapper)を1本のtarballに固め、
+#   固定タグの GitHub Release にアップロードし続けるためのワークフロー。
+#
+#   dl.google.com / repo.maven.apache.org / jitpack.io に直接アクセスできない
+#   環境(サンドボックス化された開発補助環境など)でも、github.com /
+#   release-assets.githubusercontent.com からこの Release をダウンロードすれば
+#   本リポジトリをオフラインでビルド・検証できるようにするためのもの。
+#
+# 実行タイミング:
+#   - 手動実行 (workflow_dispatch)
+#   - 依存関係に影響するファイル (build.gradle.kts / settings.gradle.kts /
+#     gradle/wrapper 以下) が main に push されたとき
+#
+# 生成物:
+#   タグ "build-cache" の Release に以下のアセットを添付(毎回まるごと作り直す):
+#     - android-sdk.tar.zst      : cmdline-tools/platform-tools/platforms/build-tools/licenses
+#     - gradle-cache.tar.zst     : ~/.gradle/caches ~/.gradle/wrapper (依存jar/aar/Gradle本体)
+#     - MANIFEST.txt             : 生成日時・コミットSHA・各アーカイブのサイズとsha256
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "main" ]
+    paths:
+      - "**/build.gradle.kts"
+      - "settings.gradle.kts"
+      - "gradle/wrapper/**"
+      - ".github/workflows/build-cache.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  build-cache:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK (cmdline-tools/platform-tools/platform/build-tools)
+        uses: android-actions/setup-android@v3
+        with:
+          packages: "platform-tools platforms;android-34 build-tools;34.0.0"
+
+      - name: Setup Gradle (populates gradle wrapper distribution too)
+        uses: gradle/actions/setup-gradle@v3
+
+      # generate a wrapper matching the version this project builds with, so
+      # ~/.gradle/wrapper/dists ends up populated inside gradle-cache.tar.zst
+      - name: Ensure Gradle wrapper is present
+        run: gradle wrapper --gradle-version 8.4 --no-daemon
+
+      # Resolve (but don't need to fully build/sign) every dependency used by
+      # the project, for both build types, so the Gradle module/dependency
+      # cache is fully warmed.
+      - name: Resolve all dependencies (warm Gradle cache)
+        run: |
+          ./gradlew --no-daemon \
+            :app:dependencies \
+            :app:assembleDebug \
+            :app:assembleRelease \
+            -x lint -x lintVitalRelease || true
+          # Some tasks may fail (e.g. unsigned release lint), that's fine —
+          # what matters is that dependency artifacts were downloaded into
+          # ~/.gradle/caches along the way.
+
+      - name: Package Android SDK
+        run: |
+          tar -I 'zstd -19 -T0' -cf android-sdk.tar.zst \
+            -C "${ANDROID_HOME}" \
+            cmdline-tools platform-tools platforms build-tools licenses
+
+      - name: Package Gradle cache
+        run: |
+          tar -I 'zstd -19 -T0' -cf gradle-cache.tar.zst \
+            -C "${HOME}" \
+            .gradle/caches .gradle/wrapper
+
+      - name: Build manifest
+        run: |
+          {
+            echo "PrivFileManager build-cache"
+            echo "generated_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "commit: ${GITHUB_SHA}"
+            echo ""
+            echo "android-sdk.tar.zst  $(du -h android-sdk.tar.zst | cut -f1)  sha256=$(sha256sum android-sdk.tar.zst | cut -d' ' -f1)"
+            echo "gradle-cache.tar.zst $(du -h gradle-cache.tar.zst | cut -f1)  sha256=$(sha256sum gradle-cache.tar.zst | cut -d' ' -f1)"
+            echo ""
+            echo "使い方 (展開先の例):"
+            echo "  tar -I zstd -xf android-sdk.tar.zst  -C \$ANDROID_HOME"
+            echo "  tar -I zstd -xf gradle-cache.tar.zst -C \$HOME"
+          } > MANIFEST.txt
+          cat MANIFEST.txt
+
+      # 固定タグのReleaseを毎回作り直す(古いアセットが残らないよう先に削除)
+      - name: Recreate build-cache release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release delete build-cache --yes --cleanup-tag || true
+
+      - name: Publish build-cache release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-cache
+          name: "Build cache (SDK + Gradle deps)"
+          body_path: MANIFEST.txt
+          files: |
+            android-sdk.tar.zst
+            gradle-cache.tar.zst
+            MANIFEST.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -24,12 +24,18 @@ name: Build Cache (SDK + Gradle deps)
 
 on:
   workflow_dispatch:
+    inputs:
+      target_repo:
+        description: "キャッシュを作る対象リポジトリ (owner/repo)"
+        required: false
+        default: "arurion/PrivFileManager"
+      target_ref:
+        description: "対象リポジトリのブランチ/タグ/SHA"
+        required: false
+        default: "main"
   push:
     branches: [ "main" ]
     paths:
-      - "**/build.gradle.kts"
-      - "settings.gradle.kts"
-      - "gradle/wrapper/**"
       - ".github/workflows/build-cache.yml"
 
 permissions:
@@ -38,9 +44,18 @@ permissions:
 jobs:
   build-cache:
     runs-on: ubuntu-latest
+    env:
+      TARGET_REPO: ${{ github.event.inputs.target_repo || 'arurion/PrivFileManager' }}
+      TARGET_REF:  ${{ github.event.inputs.target_ref  || 'main' }}
     steps:
-      - name: Checkout
+      # このリポジトリ自体は空(ワークフロー置き場)でよく、ビルド対象の
+      # ソースは別リポジトリから明示的にcheckoutする
+      - name: Checkout target project
         uses: actions/checkout@v4
+        with:
+          repository: ${{ env.TARGET_REPO }}
+          ref: ${{ env.TARGET_REF }}
+          path: target
 
       - name: Set up JDK 17
         uses: actions/setup-java@v5
@@ -59,12 +74,14 @@ jobs:
       # generate a wrapper matching the version this project builds with, so
       # ~/.gradle/wrapper/dists ends up populated inside gradle-cache.tar.zst
       - name: Ensure Gradle wrapper is present
+        working-directory: target
         run: gradle wrapper --gradle-version 8.4 --no-daemon
 
       # Resolve (but don't need to fully build/sign) every dependency used by
       # the project, for both build types, so the Gradle module/dependency
       # cache is fully warmed.
       - name: Resolve all dependencies (warm Gradle cache)
+        working-directory: target
         run: |
           ./gradlew --no-daemon \
             :app:dependencies \

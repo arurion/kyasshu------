@@ -44,6 +44,7 @@ permissions:
 jobs:
   build-cache:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     env:
       TARGET_REPO: ${{ github.event.inputs.target_repo || 'arurion/PrivFileManager' }}
       TARGET_REF:  ${{ github.event.inputs.target_ref  || 'main' }}
@@ -94,13 +95,21 @@ jobs:
 
       - name: Package Android SDK
         run: |
-          tar -I 'zstd -19 -T0' -cf android-sdk.tar.zst \
+          # GitHub製ランナーにはAndroid SDKが最初から大量のバージョンが
+          # プリインストールされているため、必要な分だけ選んでtarに含める
+          # (でないと無関係な旧バージョンまで巻き込んで巨大化・激重になる)。
+          # 圧縮レベルも -19 は非常に重いので、速度重視で -9 に下げる。
+          tar -I 'zstd -9 -T0' -cf android-sdk.tar.zst \
             -C "${ANDROID_HOME}" \
-            cmdline-tools platform-tools platforms build-tools licenses
+            cmdline-tools/latest \
+            platform-tools \
+            platforms/android-34 \
+            build-tools/34.0.0 \
+            licenses
 
       - name: Package Gradle cache
         run: |
-          tar -I 'zstd -19 -T0' -cf gradle-cache.tar.zst \
+          tar -I 'zstd -9 -T0' -cf gradle-cache.tar.zst \
             -C "${HOME}" \
             .gradle/caches .gradle/wrapper
 
